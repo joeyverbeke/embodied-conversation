@@ -5,7 +5,7 @@ A wearable that watches how you move and says something about it.
 See [PLAN.md](PLAN.md) for the full specification. This README covers setup, and
 grows as phases land.
 
-**Current state: Phase 0 (bring-up) — awaiting hardware confirmation.**
+**Current state: Phase 1 — host validated end to end, firmware on-hardware test in progress.**
 
 ---
 
@@ -160,6 +160,102 @@ out `172.20.10.x` and the Mac's address can move between sessions, so re-check
 
 ---
 
+## Phase 1 — the piece
+
+### Host setup
+
+Needs [uv](https://docs.astral.sh/uv/) and [Ollama](https://ollama.com).
+
+```bash
+brew install uv ollama
+```
+
+Pull the model and keep it resident:
+
+```bash
+ollama serve
+```
+
+```bash
+ollama pull llama3.2:3b
+```
+
+Create the Python environment (installs `mlx-audio`, `misaki`, `websockets`,
+`ollama`):
+
+```bash
+uv sync
+```
+
+Kokoro-82M downloads on first run, and the very first synthesis also fetches
+spaCy's `en_core_web_sm` and warms Metal — about 40 s, paid once. The server
+does this at startup on purpose, so no participant ever waits for it.
+
+### Firmware
+
+```bash
+cp firmware/gradi_remark/secrets.h.example firmware/gradi_remark/secrets.h
+```
+
+Fill in SSID, password, and the Mac's IP, then:
+
+```bash
+arduino-cli compile --upload -p /dev/cu.usbmodem2101 -b esp32:esp32:XIAO_ESP32S3:PSRAM=opi firmware/gradi_remark
+```
+
+PSRAM **must** be on — the 512 KB audio ring lives there and the firmware
+refuses to start without it.
+
+Libraries beyond Phase 0: `WebSockets` 2.7.2 (Markus Sattler).
+
+```bash
+arduino-cli lib install "WebSockets"
+```
+
+### Run
+
+```bash
+caffeinate -i uv run python -m host.server
+```
+
+`caffeinate -i` matters: if the Mac sleeps, the server dies mid-session.
+
+Power the device. It joins WiFi, connects, and starts streaming. Perform a
+gesture; it responds.
+
+### Calibrating the limb axis
+
+`start pose → end pose` in the descriptor comes from gravity, which needs to
+know which sensor axis runs along the arm. That is **not** guessable from the
+BNO085 silkscreen: the sensor sits rotated on the breadboard and the breadboard
+sits at an angle on the hand. Guessing it wrong doesn't produce vague output,
+it produces confidently reversed output — every `hanging → overhead` announced
+as `overhead → hanging`.
+
+Re-run this whenever the enclosure or mounting changes. Stop the server first
+(it needs port 8765), wear the device, and hold three poses when prompted:
+
+```bash
+uv run python -m host.measure_axis
+```
+
+Put the reported `LIMB_AXIS` / `LIMB_SIGN` into `host/config.py`. The `swing`
+value should be close to 2.0; much less means the poses weren't held distinctly
+enough.
+
+### Editing the voice
+
+`persona/persona.txt` is hot-reloaded on every gesture — edit and save, and the
+next response uses it. No restart. This file is a placeholder and is meant to
+be replaced.
+
+Thresholds live in `host/config.py`; those need a restart.
+
+### If the board won't take a new sketch
+
+`arduino-cli` sometimes can't reset a running sketch into the bootloader.
+Hold **B** (BOOT), tap **R** (RESET), release **B**, then upload again.
+
 ## macOS notes (relevant from Phase 1 on)
 
 - **Local Network permission.** macOS 15+ prompts once when a process first
@@ -167,4 +263,7 @@ out `172.20.10.x` and the Mac's address can move between sessions, so re-check
   *silently* — no error on either side. Grant it under **System Settings →
   Privacy & Security → Local Network**, and enable the entry for Terminal (or
   whichever app runs Python).
-- **Sleep kills the server.** Run it as `caffeinate -i python -m host.server`.
+- **Sleep kills the server.** Run it as `caffeinate -i uv run python -m host.server`.
+- **Getting the LAN IP.** `ipconfig getifaddr en0`, falling back to `en1` —
+  `en0` is Wi-Fi on most Apple Silicon laptops but Ethernet on some, so check
+  both and use the one on the device's network.
