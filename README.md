@@ -1,0 +1,170 @@
+# gradi-remark
+
+A wearable that watches how you move and says something about it.
+
+See [PLAN.md](PLAN.md) for the full specification. This README covers setup, and
+grows as phases land.
+
+**Current state: Phase 0 (bring-up) — awaiting hardware confirmation.**
+
+---
+
+## Hardware
+
+| Signal | XIAO pin | GPIO | To |
+|---|---|---|---|
+| I2C SDA | D4 | 5 | BNO085 SDA |
+| I2C SCL | D5 | 6 | BNO085 SCL |
+| I2S BCLK | D10 | 9 | MAX98357A BCLK |
+| I2S LRCLK | D9 | 8 | MAX98357A LRC |
+| I2S DIN | D8 | 7 | MAX98357A DIN |
+| Amp enable | — | — | MAX98357A SD → 3V3 |
+| Power | 3V3, GND | | both breakouts |
+
+BNO085 must be in I2C mode: PS0 and PS1 both LOW (the Adafruit breakout's
+default). Address `0x4A`, or `0x4B` with the ADR jumper bridged.
+
+---
+
+## Firmware toolchain
+
+Verified with:
+
+| | version |
+|---|---|
+| `arduino-cli` | 1.4.1 |
+| `esp32:esp32` core | 3.3.1 |
+| Adafruit BNO08x | 1.2.5 |
+| Adafruit BusIO | 1.17.4 |
+| Adafruit Unified Sensor | 1.1.15 |
+
+Install, if starting from nothing:
+
+```bash
+brew install arduino-cli
+```
+
+```bash
+arduino-cli config init && arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json && arduino-cli core update-index && arduino-cli core install esp32:esp32 && arduino-cli lib install "Adafruit BNO08x"
+```
+
+I2S comes from `ESP_I2S`, bundled with the esp32 core — nothing to install.
+
+### Board options
+
+PSRAM is **disabled by default** on this board and must be turned on — Phase 1
+puts a 512 KB audio ring buffer there. The FQBN below carries the setting, so
+building from the command line needs no menu fiddling. In the Arduino IDE, set
+**Tools → PSRAM → OPI PSRAM** by hand.
+
+---
+
+## Phase 0 — bring-up
+
+Checks, in order: I2C scan, BNO085 quaternion + gyro at 100 Hz, a 440 Hz tone
+every 5 s, and a WiFi connect that prints the assigned IP.
+
+### 1. WiFi credentials
+
+```bash
+cp firmware/bringup/secrets.h.example firmware/bringup/secrets.h
+```
+
+Then edit `firmware/bringup/secrets.h` with the network SSID, password, and the
+IP of the Mac that will run the host server. `secrets.h` is gitignored; the
+`.example` is not.
+
+Find the Mac's LAN IP with:
+
+```bash
+ipconfig getifaddr en0 || ipconfig getifaddr en1
+```
+
+`en0` is Wi-Fi on most Apple Silicon laptops but Ethernet on some machines —
+check both, and use the one on the same network as the device.
+
+### 2. Build and flash
+
+Plug the XIAO in and find its port:
+
+```bash
+arduino-cli board list
+```
+
+```bash
+arduino-cli compile --upload -p /dev/cu.usbmodem101 -b esp32:esp32:XIAO_ESP32S3:PSRAM=opi firmware/bringup
+```
+
+Substitute the port from the previous command. If the board doesn't appear,
+hold **B** while tapping **R** to enter bootloader mode, then re-run.
+
+### 3. Watch
+
+```bash
+arduino-cli monitor -p /dev/cu.usbmodem101 -c baudrate=115200
+```
+
+Expected output:
+
+Actual output from a passing run:
+
+```
+=== gradi-remark bring-up ===
+[sys] heap 314276, psram 8388608
+[i2c] scanning 0x08..0x77
+[i2c] device at 0x4A
+[imu] up at 0x4A — part 10004148, sw 3.2.6
+[imu] reports enabled @ 100 Hz
+[i2s] up — 24 kHz / 16-bit / mono
+[wifi] connecting to "the.Phone"
+[wifi] scanning...
+[wifi] 4 networks
+[wifi]   "TorranceIOT"  ch 1  -83 dBm  WPA2
+[wifi] connected — IP 172.20.10.2, RSSI -31 dBm, ch 6
+=== running: quat/gyro @100 Hz, tone every 5 s ===
+[imu] sensor reset — re-enabling reports
+[imu] reports enabled @ 100 Hz
+q  0.9998 -0.0173 -0.0104  0.0026  w  -0.006   0.000   0.000
+[rate] quat 100 Hz, gyro 100 Hz
+```
+
+### What counts as passing
+
+- The I2C scan finds `0x4A` (or `0x4B`).
+- `[rate]` reports roughly 100 Hz for both quat and gyro, steadily.
+- Quaternion values change when the board is rotated; gyro values spike when
+  it's moved and return near zero when still.
+- A clean 440 Hz tone once every 5 s, with no click at either edge.
+- WiFi prints an IP on the expected subnet.
+
+If the I2C scan finds nothing, that is a wiring or strapping problem — check
+power, SDA/SCL, and the PS0/PS1 straps rather than reaching for software
+workarounds.
+
+### WiFi troubleshooting
+
+The sketch runs a full scan before connecting and prints the reason code on
+every disconnect, so failures name themselves:
+
+| reason | meaning |
+|---|---|
+| 201 | no AP found — wrong SSID, or the AP isn't beaconing yet |
+| 202 | auth fail |
+| 204 | 4-way handshake timeout — usually a wrong password |
+
+On an **iPhone Personal Hotspot**, turn **Maximize Compatibility** on so the
+2.4 GHz band appears; the ESP32 has no 5 GHz radio. A cold hotspot can throw one
+201 before it settles — the connect loop rides that out. Note the hotspot hands
+out `172.20.10.x` and the Mac's address can move between sessions, so re-check
+`ipconfig getifaddr en0` and update `HOST_IP` after reconnecting.
+
+---
+
+## macOS notes (relevant from Phase 1 on)
+
+- **Local Network permission.** macOS 15+ prompts once when a process first
+  touches the LAN. If Python never gets it, the ESP32's connection fails
+  *silently* — no error on either side. Grant it under **System Settings →
+  Privacy & Security → Local Network**, and enable the entry for Terminal (or
+  whichever app runs Python).
+- **Sleep kills the server.** Run it as `caffeinate -i python -m host.server`.

@@ -1,0 +1,18 @@
+# secrets — never commit
+firmware/*/secrets.h
+
+# session logs
+logs/
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+.uv/
+
+# arduino build output
+build/
+firmware/*/build/
+
+# macOS
+.DS_Store
