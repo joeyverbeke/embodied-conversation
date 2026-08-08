@@ -60,12 +60,17 @@ PERCUSSIVE_MAX_S = 1.0             # ...but only if it's brief. A 2.4 s gesture
 REPEAT_MIN_PERIODS = 2.0           # need this many cycles to call it repetition
 
 # ── Voice (PLAN 5.3) ──────────────────────────────────────────────────────
-OLLAMA_MODEL = "llama3.2:3b"
+# PLAN §5.3 names llama3.2:3b. Swapped after an A/B on 30 logged gestures:
+# the 3b invents objects that were never in the descriptor ("reaching for a
+# light switch") and describes rather than judges. The 8b holds the register
+# and compares against previous gestures. Costs ~300 ms, still inside budget.
+OLLAMA_MODEL = "llama3.1:8b"
 OLLAMA_HOST = "http://127.0.0.1:11434"
 PERSONA_PATH = ROOT / "persona" / "persona.txt"
 CONTEXT_PAIRS = 5                  # recent descriptor/utterance pairs sent
-MAX_WORDS = 12
-OVERLAP_THRESHOLD = 0.6            # token overlap that triggers one retry
+MAX_WORDS = 10                     # hard truncation; the persona asks for 5-8,
+                                   # so this should rarely fire
+OVERLAP_THRESHOLD = 0.6            # content-word overlap that triggers one retry
 
 # ── TTS (PLAN 5.4) ────────────────────────────────────────────────────────
 TTS_MODEL = "prince-canuma/Kokoro-82M"

@@ -45,8 +45,19 @@ class Persona:
         return self._text
 
 
+# Short lines share function words by construction — "you", "that", "to" carry
+# no signal about whether two observations are the same observation. Comparing
+# raw tokens made almost every five-word line look like a repeat.
+_STOP = frozenset("""
+a an the and or but so of to in on at by for with from up down out back
+is are was were be been am do does did done have has had you your yours
+it its that this these those there here then than as if not no
+i me my we us our he she they them one only just very much more most
+""".split())
+
+
 def _tokens(s: str) -> set[str]:
-    return set(_WORD.findall(s.lower()))
+    return {w for w in _WORD.findall(s.lower()) if w not in _STOP}
 
 
 def _overlap(a: str, b: str) -> float:
