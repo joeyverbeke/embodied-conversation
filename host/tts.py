@@ -53,6 +53,11 @@ class TTS:
                     f"{self.sample_rate}. Something would have to resample, "
                     "which PLAN §2 forbids — stop and look at this.")
             audio = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+            # Kokoro hands back the whole utterance in one segment, so this is
+            # per-utterance normalisation and the level never jumps mid-phrase.
+            peak = float(np.abs(audio).max())
+            if peak > 0.0:
+                audio = audio * min(config.TTS_PEAK / peak, config.TTS_MAX_GAIN)
             pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
             tail = np.concatenate([tail, pcm])
             while len(tail) >= chunk:

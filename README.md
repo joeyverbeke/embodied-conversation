@@ -191,22 +191,76 @@ Kokoro-82M downloads on first run, and the very first synthesis also fetches
 spaCy's `en_core_web_sm` and warms Metal — about 40 s, paid once. The server
 does this at startup on purpose, so no participant ever waits for it.
 
+### Choosing the link
+
+The device reaches the host over **the USB cable** or **WiFi**. Two switches,
+which must agree:
+
+| | cable (default) | WiFi |
+|---|---|---|
+| `firmware/gradi_remark/config.h` | `#define LINK LINK_SERIAL` | `#define LINK LINK_WIFI` |
+| `host/config.py` | `LINK = "serial"` | `LINK = "ws"` |
+
+The cable is the default because the board is already plugged into the Mac for
+power, and it needs no network at all — which is the whole point in a room whose
+only WiFi is behind a captive portal. WiFi is where this ends up once the piece
+is untethered; that path is unchanged and still builds, it just isn't the
+default right now.
+
+Nothing about the wire format differs between them (`host/protocol.py`). Serial
+adds message framing, since a byte stream has none — see `host/framing.py`.
+
+Two consequences of the cable carrying data:
+
+- **The server owns the port**, so `arduino-cli monitor` can't run alongside it.
+  It doesn't need to: the firmware's `Serial.printf` output now appears in the
+  server log prefixed `[device]`.
+- **Stop the server before flashing**, or the upload can't open the port.
+
+`secrets.h` only matters in WiFi mode; in cable mode its contents are ignored.
+
+#### If the voice crackles
+
+USB will deliver audio faster than the device can parse it, and the ESP32's CDC
+driver drops bytes on a full buffer rather than pushing back on the host. Lost
+bytes sound like crackle, and can swallow the `UTT_END` that ends playback —
+which shows up as `no STATE idle within Ns; flushing device` in the log.
+
+The device says so when it happens:
+
+```
+[device] [link] lost 2508 bytes — host is outrunning the parser
+```
+
+Two knobs in `host/config.py`, both host-side (no reflash):
+
+| | meaning |
+|---|---|
+| `SERIAL_PACE` | sustained rate, as a multiple of realtime audio. 3.0 is comfortable. |
+| `SERIAL_BURST_BYTES` | how much goes at full USB speed before pacing bites. **Must stay well under** the device's `SERIAL_RX_BUFFER`, or the burst is itself the overflow. |
+
+Lower `SERIAL_BURST_BYTES` first — it is the usual culprit. In steady state that
+`lost N bytes` line should never appear at all.
+
 ### Firmware
 
 ```bash
 cp firmware/gradi_remark/secrets.h.example firmware/gradi_remark/secrets.h
 ```
 
-Fill in SSID, password, and the Mac's IP, then:
+Fill in SSID, password, and the Mac's IP (WiFi mode only), then:
 
 ```bash
 arduino-cli compile --upload -p /dev/cu.usbmodem2101 -b esp32:esp32:XIAO_ESP32S3:PSRAM=opi firmware/gradi_remark
 ```
 
 PSRAM **must** be on — the 512 KB audio ring lives there and the firmware
-refuses to start without it.
+refuses to start without it. The board's other defaults (`USBMode=hwcdc`,
+`CDCOnBoot=Enabled`) are what make `Serial` a native USB port rather than a
+115200 UART, so the cable has ample room for 24 kHz audio.
 
-Libraries beyond Phase 0: `WebSockets` 2.7.2 (Markus Sattler).
+Libraries beyond Phase 0: `WebSockets` 2.7.2 (Markus Sattler), needed for WiFi
+mode.
 
 ```bash
 arduino-cli lib install "WebSockets"
@@ -220,8 +274,10 @@ caffeinate -i uv run python -m host.server
 
 `caffeinate -i` matters: if the Mac sleeps, the server dies mid-session.
 
-Power the device. It joins WiFi, connects, and starts streaming. Perform a
-gesture; it responds.
+Power the device. Over the cable the host picks up the first
+`/dev/cu.usbmodem*` and waits for the board — resetting or replugging it is
+fine, the port is reopened automatically. Over WiFi the device joins the network
+and connects. Either way: perform a gesture; it responds.
 
 ### Calibrating the limb axis
 
@@ -232,8 +288,9 @@ sits at an angle on the hand. Guessing it wrong doesn't produce vague output,
 it produces confidently reversed output — every `hanging → overhead` announced
 as `overhead → hanging`.
 
-Re-run this whenever the enclosure or mounting changes. Stop the server first
-(it needs port 8765), wear the device, and hold three poses when prompted:
+Re-run this whenever the enclosure or mounting changes. It uses whichever link
+`config.LINK` names, so stop the server first — it holds the USB port (or port
+8765). Wear the device and hold three poses when prompted:
 
 ```bash
 uv run python -m host.measure_axis

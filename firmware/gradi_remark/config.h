@@ -31,6 +31,28 @@
 #define IMU_REPORT_US       10000
 #define FRAMES_PER_MESSAGE  5      // 20 messages/sec
 
+// ── Link ──────────────────────────────────────────────────────────────────
+// How the host is reached. LINK_SERIAL is the USB cable the board is already
+// on for power; LINK_WIFI is where this goes once the piece is untethered.
+// host/config.py has the matching switch — change both or nothing connects.
+#define LINK_WIFI    0
+#define LINK_SERIAL  1
+#define LINK         LINK_SERIAL
+
+// Framing for LINK_SERIAL: MAGIC0 MAGIC1 | length u16 LE | payload. Serial is
+// a byte stream, so the message boundaries WebSocket gave for free have to be
+// put back. Must match host/framing.py.
+#define FRAME_MAGIC0 0xA7
+#define FRAME_MAGIC1 0x5E
+// Largest real payload is a PCM chunk: PCM_CHUNK_MS at 24 kHz mono int16 is
+// 1920 bytes, plus a 3-byte header. Anything bigger is a bad length read out
+// of a desynced stream.
+#define MAX_FRAME    2048
+// 256 is the default. The CDC driver discards bytes when this fills rather
+// than pushing back on the host, and a dropped byte costs a whole frame — so
+// this is sized generously and the host paces itself on top (config.SERIAL_PACE).
+#define SERIAL_RX_BUFFER 16384
+
 // ── Protocol (PLAN §3) ────────────────────────────────────────────────────
 #define MSG_MOTION     0x01
 #define MSG_STATE      0x02

@@ -4,7 +4,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# ── Network ───────────────────────────────────────────────────────────────
+# ── Link ──────────────────────────────────────────────────────────────────
+# How the device is reached. "serial" is the USB cable it is already plugged
+# into for power; "ws" is WiFi, which is where this ends up once the piece is
+# untethered. The firmware has a matching switch in firmware/gradi_remark/
+# config.h — change both or nothing connects.
+LINK = "serial"
+SERIAL_PORT = None                 # None = first /dev/cu.usbmodem*
+
+# Host -> device pacing, as a multiple of realtime audio. USB will happily
+# deliver an utterance faster than the device can parse it, and the ESP32's
+# CDC driver drops bytes on a full buffer rather than pushing back — which
+# sounds like crackle and loses the UTT_END that ends playback. The device has
+# a 10.9 s ring and a 300 ms prebuffer, so a modest lead is all it ever needs.
+SERIAL_PACE = 3.0
+# Bytes allowed through at full USB speed before pacing bites. Must stay well
+# under the device's SERIAL_RX_BUFFER (16 KB) or the burst is itself the
+# overflow. The prebuffer costs ~100 ms to fill at SERIAL_PACE, so there is no
+# reason to want a big one.
+SERIAL_BURST_BYTES = 4096
+
+# Used when LINK == "ws"
 BIND_HOST = "0.0.0.0"
 BIND_PORT = 8765
 
@@ -77,6 +97,14 @@ TTS_MODEL = "prince-canuma/Kokoro-82M"
 TTS_VOICE = "af_heart"
 TTS_SPEED = 1.0
 TTS_LANG = "a"
+
+# Kokoro comes out around -11 dBFS, which wastes most of the amp's range on a
+# small speaker. Each utterance arrives as a single segment before the first
+# chunk ships, so normalising costs no latency and beats a fixed gain — a fixed
+# gain would have to be timid enough never to clip the loud ones.
+# Drop TTS_PEAK if it sounds strained; that is distortion, not volume.
+TTS_PEAK = 0.95                    # normalise each utterance to this peak
+TTS_MAX_GAIN = 8.0                 # never haul a near-silent segment up this far
 
 # ── Logging (PLAN 5.6) ────────────────────────────────────────────────────
 LOG_DIR = ROOT / "logs"

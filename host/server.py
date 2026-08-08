@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import websockets
 
-from . import config, features, protocol
+from . import config, features, link, protocol
 from .protocol import MotionFrame
 from .segmenter import Segmenter
 from .session_log import SessionLog
@@ -218,16 +218,13 @@ async def main() -> None:
         session = Session(ws=ws, voice=voice, tts=tts, logbook=logbook)
         try:
             await session.run()
-        except websockets.ConnectionClosed:
+        except (websockets.ConnectionClosed, link.LinkClosed):
             pass
         finally:
             log.info("device disconnected (%d frames, %d dropped)",
                      session.frames_seen, session.dropped)
 
-    async with websockets.serve(handler, config.BIND_HOST, config.BIND_PORT,
-                                max_size=None, ping_interval=20):
-        log.info("listening on ws://%s:%d", config.BIND_HOST, config.BIND_PORT)
-        await asyncio.Future()
+    await link.serve(handler)
 
 
 if __name__ == "__main__":

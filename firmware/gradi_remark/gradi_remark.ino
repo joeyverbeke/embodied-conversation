@@ -12,20 +12,18 @@
 #include <Wire.h>
 #include <Adafruit_BNO08x.h>
 #include <ESP_I2S.h>
-#include <WiFi.h>
-#include <WebSocketsClient.h>
 
 #include "config.h"
 #include "secrets.h"
+#include "link.h"
 
 Adafruit_BNO08x bno08x(-1);
 sh2_SensorValue_t sensorValue;
 I2SClass i2s;
-WebSocketsClient webSocket;
 
-// ── Audio ring (PSRAM). Single producer: the WebSocket task. Single
-// consumer: the audio task. Lock-free by construction — do not add a second
-// writer without adding a mutex. ───────────────────────────────────────────
+// ── Audio ring (PSRAM). Single producer: the link. Single consumer: the
+// audio task. Lock-free by construction — do not add a second writer without
+// adding a mutex. ──────────────────────────────────────────────────────────
 static int16_t *ring = nullptr;
 static volatile uint32_t ring_w = 0;      // producer index
 static volatile uint32_t ring_r = 0;      // consumer index
@@ -44,10 +42,6 @@ static uint32_t last_sample_ms = 0;
 static uint8_t batch[1 + FRAMES_PER_MESSAGE * 36];
 static int batch_count = 0;
 
-// ── Connection ────────────────────────────────────────────────────────────
-static bool ws_connected = false;
-static uint32_t backoff_ms = RECONNECT_MIN_MS;
-
 static bool enableReports();
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -59,14 +53,20 @@ static void ring_reset() {
   ring_r = ring_w = 0;
 }
 
-static void ring_write(const int16_t *src, uint32_t n) {
+// src is raw bytes, not int16_t*, because PCM samples land at an odd offset
+// inside the received frame (opcode + utt_id = 3 bytes) and a misaligned
+// int16_t load is not something to gamble a live show on. memcpy of 2 bytes
+// costs nothing here.
+static void ring_write(const uint8_t *src, uint32_t n) {
   uint32_t free_space = RING_SAMPLES - ring_available();
   if (n > free_space) {
     overflow_samples += (n - free_space);
     n = free_space;             // drop the tail rather than corrupt the ring
   }
   for (uint32_t i = 0; i < n; i++) {
-    ring[(ring_w + i) & RING_MASK] = src[i];
+    int16_t s;
+    memcpy(&s, src + 2 * i, 2);
+    ring[(ring_w + i) & RING_MASK] = s;
   }
   ring_w += n;
 }
@@ -133,11 +133,11 @@ static void audioTask(void *arg) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// WebSocket
+// Messages. Identical whichever carrier delivered them — see link.h.
 
 static void sendState(uint8_t s) {
   uint8_t msg[2] = {MSG_STATE, s};
-  webSocket.sendBIN(msg, 2);
+  link_send(msg, 2);
 }
 
 static void sendLog(const char *text) {
@@ -146,71 +146,54 @@ static void sendLog(const char *text) {
   msg[0] = MSG_LOG;
   if (n > sizeof(msg) - 1) n = sizeof(msg) - 1;
   memcpy(msg + 1, text, n);
-  webSocket.sendBIN(msg, n + 1);
+  link_send(msg, n + 1);
 }
 
-static void onWsEvent(WStype_t type, uint8_t *payload, size_t length) {
-  switch (type) {
-    case WStype_CONNECTED:
-      ws_connected = true;
-      backoff_ms = RECONNECT_MIN_MS;
-      webSocket.setReconnectInterval(backoff_ms);
-      Serial.println(F("[ws] connected"));
-      sendLog("device up");
-      sendState(playing ? STATE_PLAYING : STATE_IDLE);
+static void onLinkUp() {
+  sendLog("device up");
+  sendState(playing ? STATE_PLAYING : STATE_IDLE);
+}
+
+// drop everything buffered and go silent; a power cycle must never be
+// required to recover
+static void onLinkDown() {
+  utt_open = utt_closing = false;
+  playing = false;
+  ring_reset();
+}
+
+static void onMessage(const uint8_t *payload, size_t length) {
+  if (length < 1) return;
+  switch (payload[0]) {
+    case MSG_UTT_BEGIN: {
+      if (length < 7) return;
+      uint32_t sr;
+      memcpy(&sr, payload + 1, 4);
+      if (sr != SAMPLE_RATE) {
+        Serial.printf("[link] host sent %lu Hz, expected %d — ignoring\n",
+                      (unsigned long)sr, SAMPLE_RATE);
+        return;
+      }
+      ring_reset();
+      overflow_samples = 0;
+      utt_open = true;
+      utt_closing = false;
+      break;
+    }
+    case MSG_PCM: {
+      if (length < 3) return;
+      ring_write(payload + 3, (length - 3) / 2);
+      break;
+    }
+    case MSG_UTT_END:
+      utt_closing = true;
       break;
 
-    case WStype_DISCONNECTED:
-      ws_connected = false;
-      // drop everything buffered and go silent; a power cycle must never be
-      // required to recover
+    case MSG_FLUSH:
       utt_open = utt_closing = false;
       playing = false;
       ring_reset();
-      backoff_ms = min<uint32_t>(backoff_ms * 2, RECONNECT_MAX_MS);
-      webSocket.setReconnectInterval(backoff_ms);
-      Serial.printf("[ws] disconnected, retry in %lu ms\n",
-                    (unsigned long)backoff_ms);
-      break;
-
-    case WStype_BIN: {
-      if (length < 1) return;
-      switch (payload[0]) {
-        case MSG_UTT_BEGIN: {
-          if (length < 7) return;
-          uint32_t sr;
-          memcpy(&sr, payload + 1, 4);
-          if (sr != SAMPLE_RATE) {
-            Serial.printf("[ws] host sent %lu Hz, expected %d — ignoring\n",
-                          (unsigned long)sr, SAMPLE_RATE);
-            return;
-          }
-          ring_reset();
-          overflow_samples = 0;
-          utt_open = true;
-          utt_closing = false;
-          break;
-        }
-        case MSG_PCM: {
-          if (length < 3) return;
-          ring_write((const int16_t *)(payload + 3), (length - 3) / 2);
-          break;
-        }
-        case MSG_UTT_END:
-          utt_closing = true;
-          break;
-
-        case MSG_FLUSH:
-          utt_open = utt_closing = false;
-          playing = false;
-          ring_reset();
-          report_idle = true;
-          break;
-      }
-      break;
-    }
-
-    default:
+      report_idle = true;
       break;
   }
 }
@@ -300,60 +283,8 @@ static void appendFrame(uint32_t t_ms) {
 
 // ──────────────────────────────────────────────────────────────────────────
 
-// 15 = 4-way handshake timeout (bad password), 201 = no AP found,
-// 202 = auth fail. Without these a failure is just a row of dots.
-static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-    Serial.printf(" [reason %d]", info.wifi_sta_disconnected.reason);
-  }
-}
-
-static void connectWiFi() {
-  WiFi.onEvent(onWiFiEvent);
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);        // modem sleep injects 100-200 ms of jitter
-
-  for (int attempt = 1; ; attempt++) {
-    WiFi.disconnect(true);
-    delay(100);
-
-    // Phase 0 finding: an iPhone hotspot doesn't beacon reliably until the
-    // radio has swept the band. Without this scan the first connect fails
-    // with a handshake timeout that looks exactly like a wrong password.
-    int n = WiFi.scanNetworks(false, true);
-    bool visible = false;
-    for (int i = 0; i < n; i++) {
-      if (WiFi.SSID(i) == WIFI_SSID) visible = true;
-    }
-    Serial.printf("[wifi] attempt %d: %d networks, \"%s\" %s\n",
-                  attempt, n, WIFI_SSID, visible ? "visible" : "NOT visible");
-    WiFi.scanDelete();
-
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) {
-      delay(250);
-      Serial.print('.');
-    }
-    Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("[wifi] %s  RSSI %d dBm  ch %d\n",
-                    WiFi.localIP().toString().c_str(), WiFi.RSSI(),
-                    WiFi.channel());
-      return;
-    }
-    // Keep trying forever — a wearable that gives up needs a human.
-    Serial.printf("[wifi] attempt %d failed (status %d), retrying\n",
-                  attempt, WiFi.status());
-    delay(2000);
-  }
-}
-
 void setup() {
-  Serial.begin(115200);
-  uint32_t t0 = millis();
-  while (!Serial && millis() - t0 < 2000) delay(10);
+  link_begin();                  // owns Serial; must run before anything prints
 
   Serial.println(F("\n=== gradi-remark ==="));
 
@@ -384,23 +315,18 @@ void setup() {
   }
   Serial.println(F("[i2s] 24 kHz / 16-bit / mono, running continuously"));
 
-  connectWiFi();
-
   batch[0] = MSG_MOTION;
-  webSocket.begin(HOST_IP, HOST_PORT, "/");
-  webSocket.onEvent(onWsEvent);
-  webSocket.setReconnectInterval(RECONNECT_MIN_MS);
-  Serial.printf("[ws] target ws://%s:%d\n", HOST_IP, HOST_PORT);
+  link_start();
 
   // Audio on core 0, everything else on core 1. The blocking I2S write must
-  // never be able to stall the IMU or the socket.
+  // never be able to stall the IMU or the link.
   xTaskCreatePinnedToCore(audioTask, "audio", 4096, nullptr, 3, nullptr, 0);
 
   last_sample_ms = millis();
 }
 
 void loop() {
-  webSocket.loop();
+  link_loop();
   pollIMU();
 
   uint32_t now = millis();
@@ -408,24 +334,29 @@ void loop() {
     last_sample_ms += IMU_INTERVAL_MS;
     appendFrame(now);
     if (batch_count >= FRAMES_PER_MESSAGE) {
-      if (ws_connected) webSocket.sendBIN(batch, sizeof(batch));
+      if (link_connected()) link_send(batch, sizeof(batch));
       batch_count = 0;
     }
   }
 
-  // STATE is reported from here, not from the audio task — the WebSocket
-  // library is not thread-safe.
+  // STATE is reported from here, not from the audio task — neither carrier is
+  // thread-safe.
   if (report_playing) {
     report_playing = false;
-    if (ws_connected) sendState(STATE_PLAYING);
+    if (link_connected()) sendState(STATE_PLAYING);
   }
   if (report_idle) {
     report_idle = false;
-    if (ws_connected) sendState(STATE_IDLE);
+    if (link_connected()) sendState(STATE_IDLE);
     if (overflow_samples) {
       Serial.printf("[audio] ring overflowed by %lu samples\n",
                     (unsigned long)overflow_samples);
       overflow_samples = 0;
+    }
+    if (link_resync_bytes) {
+      Serial.printf("[link] lost %lu bytes — host is outrunning the parser\n",
+                    (unsigned long)link_resync_bytes);
+      link_resync_bytes = 0;
     }
   }
 }

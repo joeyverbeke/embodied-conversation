@@ -5,9 +5,8 @@ Hold three poses; this reports the LIMB_AXIS / LIMB_SIGN to put in config.py.
 """
 import asyncio, sys, time
 import numpy as np
-import websockets
 
-from . import protocol
+from . import link, protocol
 
 POSES = [
     ("HANGING  — arm straight down at your side, hand flat", 7),
@@ -52,14 +51,23 @@ async def handler(ws):
         print(f"        captured {len(mid)} frames\n")
 
     task.cancel()
-    await ws.close()
+    close = getattr(ws, "close", None)
+    if close is not None:
+        await close()
 
 
 async def main():
-    async with websockets.serve(handler, "0.0.0.0", 8765, max_size=None):
-        print("waiting for the device (make sure host.server is stopped)...")
-        while len(samples) < len(POSES):
-            await asyncio.sleep(0.2)
+    # Same transport as the server, so this works over the cable or over WiFi
+    # depending on config.LINK. Either way the server must be stopped first —
+    # it holds the port.
+    serving = asyncio.create_task(link.serve(handler))
+    print("waiting for the device (make sure host.server is stopped)...")
+    while len(samples) < len(POSES):
+        if serving.done():
+            await serving          # re-raise whatever killed it
+            return
+        await asyncio.sleep(0.2)
+    serving.cancel()
 
     print("=" * 58)
     hang = samples["HANGING"] / np.linalg.norm(samples["HANGING"])
