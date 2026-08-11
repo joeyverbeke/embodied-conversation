@@ -115,8 +115,37 @@ def extract(seg: Segment) -> dict:
     }
 
 
-def describe(f: dict) -> str:
-    """The one line the LLM sees. Round figures only, no telemetry."""
+def classify(f: dict) -> str:
+    """The shape of the movement. Shared with the corpus so both agree."""
+    dur = f["duration_s"]
+    reversals = f["reversals"]
+    repeat = f["repeat_hz"]
+    direct = f["directness"]
+    # percussive means a strike, so it has to be brief as well as fast
+    percussive = (f["peak_dps"] >= config.PERCUSSIVE_DPS
+                  and dur <= config.PERCUSSIVE_MAX_S)
+
+    if repeat and reversals >= 3:
+        return "repeated shake"
+    if percussive and f["time_to_peak"] <= config.EARLY_PEAK_FRAC:
+        return "sharp jab"
+    if direct >= config.DIRECT_RATIO:
+        return "single arc"
+    if reversals >= 3:
+        return "scribble"
+    if direct < config.RETURN_RATIO:
+        return "out and back"
+    return "loose sweep"
+
+
+def describe(f: dict, facts: list[str] | None = None) -> str:
+    """The one line the LLM sees. Round figures only, no telemetry.
+
+    `facts` is what the corpus makes of this gesture. Putting it here rather
+    than leaving the model to infer comparison from context is the difference
+    between a claim that happens to be true and one that is checked — and on
+    143 logged gestures the comparative lines were the only good ones.
+    """
     if not f:
         return "a movement too short to read"
 
@@ -125,21 +154,8 @@ def describe(f: dict) -> str:
     reversals = f["reversals"]
     repeat = f["repeat_hz"]
     direct = f["directness"]
-    # percussive means a strike, so it has to be brief as well as fast
     percussive = peak >= config.PERCUSSIVE_DPS and dur <= config.PERCUSSIVE_MAX_S
-
-    if repeat and reversals >= 3:
-        kind = "repeated shake"
-    elif percussive and f["time_to_peak"] <= config.EARLY_PEAK_FRAC:
-        kind = "sharp jab"
-    elif direct >= config.DIRECT_RATIO:
-        kind = "single arc"
-    elif reversals >= 3:
-        kind = "scribble"
-    elif direct < config.RETURN_RATIO:
-        kind = "out and back"
-    else:
-        kind = "loose sweep"
+    kind = classify(f)
 
     parts = [f"{dur:.1f}s {kind}"]
 
@@ -161,4 +177,7 @@ def describe(f: dict) -> str:
             parts.append("late acceleration")
 
     parts.append(f"{f['start_pose']} → {f['end_pose']}")
-    return ", ".join(parts)
+    line = ", ".join(parts)
+    if facts:
+        line += "\n  compared to everyone so far: " + "; ".join(facts)
+    return line

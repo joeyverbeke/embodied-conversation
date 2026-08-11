@@ -88,8 +88,10 @@ OLLAMA_MODEL = "llama3.1:8b"
 OLLAMA_HOST = "http://127.0.0.1:11434"
 PERSONA_PATH = ROOT / "persona" / "persona.txt"
 CONTEXT_PAIRS = 5                  # recent descriptor/utterance pairs sent
-MAX_WORDS = 10                     # hard truncation; the persona asks for 5-8,
-                                   # so this should rarely fire
+MAX_WORDS = 22                     # hard truncation only. Nobody waits for the
+                                   # device to finish before gesturing again, so
+                                   # speech length costs nothing and the room to
+                                   # say something is worth more than brevity.
 OVERLAP_THRESHOLD = 0.6            # content-word overlap that triggers one retry
 
 # ── TTS (PLAN 5.4) ────────────────────────────────────────────────────────
@@ -105,6 +107,12 @@ TTS_LANG = "a"
 # Drop TTS_PEAK if it sounds strained; that is distortion, not volume.
 TTS_PEAK = 0.95                    # normalise each utterance to this peak
 TTS_MAX_GAIN = 8.0                 # never haul a near-silent segment up this far
+
+# ── Corpus ────────────────────────────────────────────────────────────────
+# Everything the machine has watched, across every person who has picked it up.
+# Delete this file to start an evening fresh; it is what makes "nobody has done
+# that" a true statement rather than a bluff.
+CORPUS_PATH = ROOT / "logs" / "corpus.jsonl"
 
 # ── Logging (PLAN 5.6) ────────────────────────────────────────────────────
 LOG_DIR = ROOT / "logs"

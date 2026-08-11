@@ -17,6 +17,7 @@ import websockets
 from . import config, features, link, protocol
 from .protocol import MotionFrame
 from .segmenter import Segmenter
+from .corpus import Corpus
 from .session_log import SessionLog
 from .tts import TTS
 from .voice import Voice
@@ -46,6 +47,7 @@ class Session:
     voice: Voice
     tts: TTS
     logbook: SessionLog
+    corpus: Corpus
     segmenter: Segmenter = field(default_factory=Segmenter)
     state: State = field(default_factory=State)
     utt_id: int = 0
@@ -115,7 +117,13 @@ class Session:
         t0 = t_detected
 
         feat = features.extract(seg)
-        descriptor = features.describe(feat)
+        kind = features.classify(feat) if feat else None
+        # Read the corpus before adding to it, or every gesture is its own
+        # precedent and nothing is ever new.
+        facts = self.corpus.observe(kind, feat) if feat else []
+        if feat:
+            self.corpus.add(kind, feat)
+        descriptor = features.describe(feat, facts)
         timings["features"] = (time.monotonic() - t0) * 1000
 
         self.state.now = time.monotonic()
@@ -210,12 +218,15 @@ async def main() -> None:
     log.info("  kokoro ready (%.1fs)", time.monotonic() - t0)
 
     logbook = SessionLog()
+    corpus = Corpus()
+    log.info("corpus: %s", corpus.summary())
     log.info("logging to %s", logbook.path)
 
     async def handler(ws):
         peer = getattr(ws, "remote_address", ("?",))[0]
         log.info("device connected from %s", peer)
-        session = Session(ws=ws, voice=voice, tts=tts, logbook=logbook)
+        session = Session(ws=ws, voice=voice, tts=tts, logbook=logbook,
+                          corpus=corpus)
         try:
             await session.run()
         except (websockets.ConnectionClosed, link.LinkClosed):
