@@ -279,26 +279,40 @@ Power the device. Over the cable the host picks up the first
 fine, the port is reopened automatically. Over WiFi the device joins the network
 and connects. Either way: perform a gesture; it responds.
 
-### Calibrating the limb axis
+### Replaying a session
 
-`start pose → end pose` in the descriptor comes from gravity, which needs to
-know which sensor axis runs along the arm. That is **not** guessable from the
-BNO085 silkscreen: the sensor sits rotated on the breadboard and the breadboard
-sits at an angle on the hand. Guessing it wrong doesn't produce vague output,
-it produces confidently reversed output — every `hanging → overhead` announced
-as `overhead → hanging`.
-
-Re-run this whenever the enclosure or mounting changes. It uses whichever link
-`config.LINK` names, so stop the server first — it holds the USB port (or port
-8765). Wear the device and hold three poses when prompted:
+Every logged gesture carries its raw frames, so segmentation, trajectory and
+features can all be retuned at a desk against real movement:
 
 ```bash
-uv run python -m host.measure_axis
+uv run python -m host.replay logs/session-20260808-163514.jsonl --verbose
 ```
 
-Put the reported `LIMB_AXIS` / `LIMB_SIGN` into `host/config.py`. The `swing`
-value should be close to 2.0; much less means the poses weren't held distinctly
-enough.
+By default each stored segment is re-featurised in place. `--resegment` feeds
+every frame back through a fresh `Segmenter` instead, which is the only way to
+test the gates themselves — including whether movements that used to fall below
+them are now caught.
+
+Logs recorded before the accelerometer was enabled carry nine fields per frame
+instead of fifteen. They replay, and the rotation features still mean what they
+always did, but nothing depending on the trajectory can be computed from them.
+Those descriptors come out as `distance unclear` rather than being guessed at.
+
+### Checking the trajectory against a tape measure
+
+The reconstruction is the one thing in the pipeline that can be confidently
+wrong, so verify it directly rather than trusting it. Hold the ball at a marked
+height, lift it exactly 30 cm, hold, and replay:
+
+```bash
+uv run python -m host.replay logs/<the session>.jsonl --verbose
+```
+
+It should report 25–35 cm. If it does not, the zero-velocity correction or the
+world-frame rotation is wrong, and nothing downstream is worth tuning until it
+is fixed. There is no calibration step to perform here — Game Rotation Vector's
+world frame already has +Z up, so "rose" and "fell" are absolute without anyone
+having to hold poses first.
 
 ### Editing the voice
 

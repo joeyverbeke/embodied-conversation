@@ -36,10 +36,26 @@ static volatile bool report_idle = false;
 static volatile uint32_t overflow_samples = 0;
 
 // ── IMU ───────────────────────────────────────────────────────────────────
-static float qw = 1, qx = 0, qy = 0, qz = 0, gx = 0, gy = 0, gz = 0;
+// Four reports, not two. The ball is held, not strapped to a limb, so where it
+// *went* matters more than how it spun — and rotation alone cannot see a lift,
+// a carry, or a gentle throw. See host/protocol.py for why both linear and raw
+// acceleration are carried.
+static float qw = 1, qx = 0, qy = 0, qz = 0;
+static float gx = 0, gy = 0, gz = 0;
+static float lax = 0, lay = 0, laz = 0;
+static float ax = 0, ay = 0, az = 0;
+
+// Frames are stamped with millis(), not with the sensor hub's own report time.
+// The hub timestamp would be better in principle — orientation and gyro arrive
+// as separate reports a moment apart and get fused into one frame as though
+// simultaneous, which matters for jerk. But sh2_SensorValue_t.timestamp is not
+// populated by this library: it reads back as ~UINT32_MAX, which divided down
+// pins every frame to the same millisecond and destroys the timebase the
+// segmenter runs on. Measured, not assumed. Do not reinstate it without
+// checking the field actually advances.
 static uint32_t seq = 0;
 static uint32_t last_sample_ms = 0;
-static uint8_t batch[1 + FRAMES_PER_MESSAGE * 36];
+static uint8_t batch[1 + FRAMES_PER_MESSAGE * MOTION_FRAME_BYTES];
 static int batch_count = 0;
 
 static bool enableReports();
@@ -201,9 +217,13 @@ static void onMessage(const uint8_t *payload, size_t length) {
 // ──────────────────────────────────────────────────────────────────────────
 // IMU
 
+// Four streams at 100 Hz is roughly a third of a 400 kHz I2C bus. There is
+// room, but not unlimited room — adding a fifth is a measurement, not a guess.
 static bool enableReports() {
   bool ok = bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_REPORT_US);
   ok &= bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_REPORT_US);
+  ok &= bno08x.enableReport(SH2_LINEAR_ACCELERATION, IMU_REPORT_US);
+  ok &= bno08x.enableReport(SH2_ACCELEROMETER, IMU_REPORT_US);
   return ok;
 }
 
@@ -258,16 +278,27 @@ static void pollIMU() {
         gy = sensorValue.un.gyroscope.y;
         gz = sensorValue.un.gyroscope.z;
         break;
+      case SH2_LINEAR_ACCELERATION:
+        lax = sensorValue.un.linearAcceleration.x;
+        lay = sensorValue.un.linearAcceleration.y;
+        laz = sensorValue.un.linearAcceleration.z;
+        break;
+      case SH2_ACCELEROMETER:
+        ax = sensorValue.un.accelerometer.x;
+        ay = sensorValue.un.accelerometer.y;
+        az = sensorValue.un.accelerometer.z;
+        break;
       default:
         break;
     }
   }
 }
 
-// Pack one MOTION frame: seq u32, t_ms u32, quat f32x4, gyro f32x3.
-// Little-endian, which is native here — must match host/protocol.py exactly.
+// Pack one MOTION frame: seq u32, t_ms u32, quat f32x4, gyro f32x3,
+// linear accel f32x3, accel f32x3. Little-endian, which is native here — must
+// match host/protocol.py exactly.
 static void appendFrame(uint32_t t_ms) {
-  uint8_t *p = batch + 1 + batch_count * 36;
+  uint8_t *p = batch + 1 + batch_count * MOTION_FRAME_BYTES;
   memcpy(p +  0, &seq,  4);
   memcpy(p +  4, &t_ms, 4);
   memcpy(p +  8, &qw,   4);
@@ -277,6 +308,12 @@ static void appendFrame(uint32_t t_ms) {
   memcpy(p + 24, &gx,   4);
   memcpy(p + 28, &gy,   4);
   memcpy(p + 32, &gz,   4);
+  memcpy(p + 36, &lax,  4);
+  memcpy(p + 40, &lay,  4);
+  memcpy(p + 44, &laz,  4);
+  memcpy(p + 48, &ax,   4);
+  memcpy(p + 52, &ay,   4);
+  memcpy(p + 56, &az,   4);
   seq++;
   batch_count++;
 }
@@ -357,6 +394,11 @@ void loop() {
       Serial.printf("[link] lost %lu bytes — host is outrunning the parser\n",
                     (unsigned long)link_resync_bytes);
       link_resync_bytes = 0;
+    }
+    if (link_dropped_frames) {
+      Serial.printf("[link] dropped %lu frames — TX buffer full\n",
+                    (unsigned long)link_dropped_frames);
+      link_dropped_frames = 0;
     }
   }
 }

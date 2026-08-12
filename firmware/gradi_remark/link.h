@@ -27,6 +27,7 @@ static bool link_connected();
 // anything else means bytes were lost, which corrupts audio and can swallow
 // the UTT_END that ends playback. Worth saying out loud.
 static uint32_t link_resync_bytes = 0;
+static uint32_t link_dropped_frames = 0;
 
 
 #if LINK == LINK_SERIAL
@@ -40,10 +41,18 @@ static uint32_t link_resync_bytes = 0;
 // So Serial.printf stays exactly as useful as it was.
 
 static void link_begin() {
-  // Both of these must happen before begin(). The default 256-byte receive
-  // buffer drops audio at 48 kB/s, and without the timeout every write blocks
-  // forever whenever the Mac isn't draining the port.
+  // All of these must happen before begin(). The default 256-byte receive
+  // buffer drops audio at 48 kB/s, and without the zero timeout every write
+  // blocks forever whenever the Mac isn't draining the port.
+  //
+  // The transmit buffer has to hold a whole MOTION message with room to spare.
+  // The default is smaller than one, and combined with the non-blocking write
+  // below that produced *truncated* frames rather than dropped ones — the host
+  // then read the next frame's magic as payload and desynced. Frames arrived at
+  // 56 Hz full of garbage quaternions, which looks like a sensor fault and is
+  // not one.
   Serial.setRxBufferSize(SERIAL_RX_BUFFER);
+  Serial.setTxBufferSize(SERIAL_TX_BUFFER);
   Serial.setTxTimeoutMs(0);
   Serial.begin(115200);
   uint32_t t0 = millis();
@@ -57,6 +66,18 @@ static void link_start() {
 
 static void link_send(const uint8_t *payload, size_t length) {
   if (length == 0 || length > MAX_FRAME) return;
+
+  // All of it or none of it. Writes here are non-blocking, so a write that does
+  // not fit is silently truncated rather than delayed — and half a frame is far
+  // worse than no frame. A dropped frame costs one sample and the host sees the
+  // gap in the sequence numbers; a truncated one desyncs the byte stream and
+  // corrupts everything after it until the unframer stumbles back into
+  // alignment.
+  if ((size_t)Serial.availableForWrite() < length + 4) {
+    link_dropped_frames++;
+    return;
+  }
+
   const uint8_t hdr[4] = {FRAME_MAGIC0, FRAME_MAGIC1,
                           (uint8_t)(length & 0xFF), (uint8_t)(length >> 8)};
   Serial.write(hdr, sizeof(hdr));

@@ -23,9 +23,19 @@ FLUSH = 0x13
 IDLE = 0
 PLAYING = 1
 
-# seq u32, t_ms u32, qw qx qy qz f32x4, gx gy gz f32x3
-_MOTION_FRAME = struct.Struct("<IIfffffff")
-MOTION_FRAME_SIZE = _MOTION_FRAME.size          # 36; +1 type byte per message
+# seq u32, t_ms u32, qw qx qy qz f32x4, gx gy gz f32x3, lax lay laz f32x3,
+# ax ay az f32x3
+#
+# Linear acceleration and raw accelerometer are both carried, which is
+# algebraically redundant — one is the other minus gravity. It is deliberate.
+# Linear acceleration is what the trajectory integrates, and the sensor hub's
+# own fusion produces a better one than we could by subtracting a quaternion
+# gravity estimate. But that estimate is worthless in free fall, which is
+# exactly when we most need to know: the raw accelerometer going to ~0 is the
+# only honest way to see that the ball is airborne. 12 extra bytes for an
+# unambiguous throw is a bargain.
+_MOTION_FRAME = struct.Struct("<IIfffffffffffff")
+MOTION_FRAME_SIZE = _MOTION_FRAME.size          # 60; +1 type byte per message
 
 _UTT_BEGIN = struct.Struct("<IH")               # sample_rate, utt_id
 _UTT_ID = struct.Struct("<H")
@@ -39,9 +49,15 @@ class MotionFrame:
     qx: float
     qy: float
     qz: float
-    gx: float
+    gx: float                       # rad/s, sensor frame
     gy: float
     gz: float
+    lax: float                      # m/s^2, sensor frame, gravity removed
+    lay: float
+    laz: float
+    ax: float                       # m/s^2, sensor frame, gravity included
+    ay: float
+    az: float
 
 
 class ProtocolError(ValueError):
@@ -86,7 +102,8 @@ def pack_motion(frames) -> bytes:
     out = bytearray([MOTION])
     for f in frames:
         out += _MOTION_FRAME.pack(f.seq, f.t_ms, f.qw, f.qx, f.qy, f.qz,
-                                  f.gx, f.gy, f.gz)
+                                  f.gx, f.gy, f.gz,
+                                  f.lax, f.lay, f.laz, f.ax, f.ay, f.az)
     return bytes(out)
 
 

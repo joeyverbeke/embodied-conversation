@@ -113,7 +113,7 @@ class Voice:
                 messages=self._messages(descriptor),
                 stream=True,
                 keep_alive=-1,
-                options={"temperature": 0.9, "num_predict": 40},
+                options={"temperature": config.TEMPERATURE, "num_predict": 60},
         ):
             out.append(part["message"]["content"])
         return _clean("".join(out))

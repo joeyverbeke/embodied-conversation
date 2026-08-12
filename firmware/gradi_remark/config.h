@@ -31,6 +31,15 @@
 #define IMU_REPORT_US       10000
 #define FRAMES_PER_MESSAGE  5      // 20 messages/sec
 
+// seq u32, t_ms u32, quat f32x4, gyro f32x3, linaccel f32x3, accel f32x3.
+// Must match MOTION_FRAME_SIZE in host/protocol.py. A message is
+// 1 + 5*60 = 301 bytes, comfortably inside MAX_FRAME below.
+#define MOTION_FRAME_BYTES  60
+
+// Do not raise IMU_HZ to buy resolution. Human movement lives below ~10 Hz,
+// so 100 is already 5x oversampled; bandwidth is better spent on more report
+// streams than on more samples of the same ones.
+
 // ── Link ──────────────────────────────────────────────────────────────────
 // How the host is reached. LINK_SERIAL is the USB cable the board is already
 // on for power; LINK_WIFI is where this goes once the piece is untethered.
@@ -52,6 +61,10 @@
 // than pushing back on the host, and a dropped byte costs a whole frame — so
 // this is sized generously and the host paces itself on top (config.SERIAL_PACE).
 #define SERIAL_RX_BUFFER 16384
+// Must comfortably exceed one MOTION message (1 + 5*60 + 4 header = 305 bytes).
+// link_send() refuses to write a frame that will not fit whole, so a buffer too
+// small to hold one does not corrupt the stream — it silences it.
+#define SERIAL_TX_BUFFER 8192
 
 // ── Protocol (PLAN §3) ────────────────────────────────────────────────────
 #define MSG_MOTION     0x01

@@ -23,23 +23,28 @@ class SessionLog:
         self._fh = self.path.open("a", encoding="utf-8")
         self.count = 0
 
-    def write(self, *, segment: Segment, features: dict, descriptor: str,
+    def write(self, *, segment: Segment | None, features: dict, descriptor: str,
               utterance: str | None, timings: dict, responded: bool,
-              reason: str = "") -> None:
+              reason: str = "", kind: str = "gesture") -> None:
         record = {
             "t": time.time(),
             "index": self.count,
+            "kind": kind,              # "gesture" or "stillness"
             "responded": responded,
             "reason": reason,
-            "segment": {
+            "segment": None if segment is None else {
                 "t_start": segment.t_start,
                 "t_end": segment.t_end,
                 "duration_ms": segment.duration_ms,
                 "ended": segment.ended,
-                "rejected_twitches": segment.rejected_twitches,
-                # raw frames, pre-roll included, so replay can re-segment
+                "hesitations": segment.hesitations,
+                "airborne_ms": segment.airborne_ms,
+                # raw frames, pre-roll included, so replay can re-segment.
+                # Field order matches protocol.MotionFrame exactly — replay
+                # rebuilds frames by splatting these straight into it.
                 "frames": [
-                    [f.seq, f.t_ms, f.qw, f.qx, f.qy, f.qz, f.gx, f.gy, f.gz]
+                    [f.seq, f.t_ms, f.qw, f.qx, f.qy, f.qz, f.gx, f.gy, f.gz,
+                     f.lax, f.lay, f.laz, f.ax, f.ay, f.az]
                     for f in segment.frames
                 ],
             },
