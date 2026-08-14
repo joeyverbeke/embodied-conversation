@@ -170,6 +170,7 @@ def extract(seg: Segment) -> dict:
         ]
         f["stroke_count"] = len(legs)
         f["shape"] = trajectory.shape(legs)
+        f["circling"] = round(trajectory.circling(path), 3)
         # How much of the journey was one leg. A directed verb — lifted,
         # lowered, swept — is only honest when one leg dominates; otherwise the
         # net displacement is an artefact of where the person happened to stop,
@@ -192,6 +193,7 @@ def extract(seg: Segment) -> dict:
         f["strokes"] = []
         f["stroke_count"] = 0
         f["shape"] = "single"
+        f["circling"] = 0.0
 
     return f
 
@@ -218,7 +220,7 @@ NOUNS = {
     "shaken": "shake", "spun": "spin", "rolled": "roll", "flipped": "flip",
     "lifted": "lift", "lowered": "lowering", "swung": "swing",
     "swept": "sweep", "carried": "carry", "jiggled": "jiggle",
-    "held": "hold", "moved": "movement",
+    "held": "hold", "moved": "movement", "circled": "circle",
 }
 
 
@@ -234,6 +236,7 @@ FAMILIES = {
     "thrown": "releasing", "caught": "releasing", "dropped": "releasing",
     "tapped": "releasing",
     "held": "nothing much", "moved": "nothing much",
+    "circled": "travelling",
 }
 
 # What to call a family out loud.
@@ -292,7 +295,14 @@ def verbs(f: dict) -> list[tuple[str, float]]:
         scores["tapped"] = _ramp(f["impact"], config.IMPACT_MS2, 120.0)
 
     if f["repeat_hz"] and f["reversals"] >= 3:
-        scores["shaken"] = 0.5 + 0.5 * _ramp(f["reversals"], 3, 10)
+        if f["repeat_hz"] >= config.MIN_SHAKE_HZ:
+            scores["shaken"] = 0.5 + 0.5 * _ramp(f["reversals"], 3, 10)
+        else:
+            # Too slow to be a shake, but it plainly repeated. Removing "shaken"
+            # without putting anything in its place left a five-second circling
+            # movement described as "barely moved", which is worse than the
+            # wrong word it replaced.
+            scores["swung"] = 0.45 + 0.45 * _ramp(f["reversals"], 3, 10)
 
     # A tossed ball tumbles. That rotation is gravity and release angle, not a
     # decision, and calling it "spun" credits the person with something they did
@@ -301,10 +311,25 @@ def verbs(f: dict) -> list[tuple[str, float]]:
         # Scored on rate alone. Weighting this by axis stability suppressed
         # every real spin: turning a ball over in two hands measures around
         # 0.43, not the ~1.0 an idealised single-axis spin would give.
-        scores["spun"] = 0.4 + 0.6 * _ramp(f["spin_rate"], config.SPIN_DPS, 300.0)
+        # Weighted by how well the axis held. A real spin turns about one axis;
+        # a ball being rolled around in someone's hands wanders all over, and
+        # calling that "spun" is the wrong word for the commonest thing people
+        # do with an object they are holding.
+        steady = _ramp(f["axis_stability"], config.TUMBLE_STABILITY * 0.6, 0.5)
+        scores["spun"] = (0.4 + 0.6 * _ramp(f["spin_rate"],
+                                            config.SPIN_DPS, 300.0)) * (0.45 + 0.55 * steady)
         if f["axis_stability"] < config.TUMBLE_STABILITY:
             scores["rolled"] = 0.4 + 0.6 * (
                 1.0 - f["axis_stability"] / config.TUMBLE_STABILITY)
+
+    if f.get("circling", 0.0) >= config.CIRCLE_FLATNESS:
+        scores["circled"] = 0.6 + 0.4 * _ramp(f["circling"],
+                                              config.CIRCLE_FLATNESS, 0.95)
+
+    # Turning it over in the hands: plenty of rotation, nowhere to go.
+    if (f["spin_rate"] >= config.SPIN_DPS
+            and f.get("trusted") and f.get("span_cm", 999) <= config.INHAND_MAX_CM):
+        scores["rolled"] = 0.55 + 0.45 * _ramp(f["spin_rate"], config.SPIN_DPS, 300.0)
 
     if f["attitude_deg"] >= 90.0 and f["spin_rate"] < config.SPIN_DPS:
         scores["flipped"] = _ramp(f["attitude_deg"], 90.0, 180.0)
@@ -329,7 +354,9 @@ def verbs(f: dict) -> list[tuple[str, float]]:
             and f["spin_rate"] < config.SPIN_DPS):
         scores["carried"] = 0.5 + 0.5 * _ramp(dur, 2.5, 8.0)
 
-    if trusted:
+    circling = f.get("circling", 0.0) >= config.CIRCLE_FLATNESS
+
+    if trusted and not circling:
         size = _ramp(span, config.SMALL_CM, config.LARGE_CM)
         # One leg carried the movement, so it is fair to name the movement after
         # a direction. Below this it went several ways and "lifted" would be a
@@ -354,6 +381,13 @@ def verbs(f: dict) -> list[tuple[str, float]]:
                 # went somewhere and stayed; purely vertical is a lift or a drop
                 scores["swept"] = 0.4 + 0.6 * size
 
+        if span < config.SMALL_CM and speed < config.STILL_SPEED_MS:
+            scores["held"] = 0.6
+
+    elif trusted:
+        # A circle *is* the travel description. Letting "swung" run alongside it
+        # meant the generic verb won by 0.04 and the specific one — the thing a
+        # person actually recognises having done — never got said.
         if span < config.SMALL_CM and speed < config.STILL_SPEED_MS:
             scores["held"] = 0.6
 
@@ -426,6 +460,42 @@ def compare(f: dict, recent: list[dict]) -> list[str]:
 
 # ── the one line the LLM sees ─────────────────────────────────────────────
 
+def _shape_words(f: dict) -> str:
+    """The form of a movement, with no distance attached to it.
+
+    Used when the scale cannot be trusted. Deliberately says nothing about how
+    far or in which direction — with a weak signal the drift dominates both —
+    but how many times it went out and came back is structural and survives.
+    """
+    if f.get("confidence", 0.0) < config.SHAPE_MIN_CONFIDENCE:
+        return ""
+    legs = [s for s in (f.get("strokes") or []) if s["cm"] >= config.SMALL_CM]
+    if len(legs) < 2:
+        return ""
+    shape = f.get("shape", "")
+    n = len(legs)
+    if shape == "there and back":
+        return "out and back"
+    cycles = max(1, n // 2)
+    if shape == "shrinking":
+        return f"out and back {cycles} times, each one smaller"
+    if shape == "growing":
+        return f"out and back {cycles} times, each one bigger"
+    return f"out and back {cycles} times"
+
+
+def _circle_words(f: dict) -> list[str]:
+    """How big the loop was, and how many times round."""
+    out = []
+    span = f.get("span_cm", 0.0)
+    if span >= config.SMALL_CM:
+        out.append(f"about {span:.0f} cm across")
+    laps = f.get("stroke_count", 0) // 2
+    if laps >= 2:
+        out.append(f"{laps} times round")
+    return out
+
+
 def _travel(f: dict) -> list[str]:
     """How far it went, leg by leg.
 
@@ -451,6 +521,9 @@ def _travel(f: dict) -> list[str]:
 
     shape = f.get("shape", "back and forth")
     total = sum(s["cm"] for s in big)
+    # Each out-and-back is two legs. Reporting the legs said "seven swings" for
+    # three, which is the machine counting its own bookkeeping out loud.
+    cycles = max(1, len(big) // 2)
     # Say metres once the number gets long. Asked to render "188 cm in all" the
     # model returned "ninety-five centimetres" — it does arithmetic on numbers
     # it is handed, and the fix is to hand it one it does not have to convert.
@@ -461,7 +534,8 @@ def _travel(f: dict) -> list[str]:
         tail = "each one bigger"
     else:
         tail = "back and forth"
-    return [f"{len(big)} legs, {tail}", f"{said} in all"]
+    times = "once" if cycles == 1 else f"{cycles} times"
+    return [f"{tail} {times}", f"{said} in all"]
 
 
 def describe(f: dict, facts: list[str] | None = None,
@@ -484,8 +558,16 @@ def describe(f: dict, facts: list[str] | None = None,
     # interesting than dropping to a vaguer word.
     if strength < 0.45:
         head = f"barely {kind}"
-    elif len(ranked) > 1 and ranked[1][1] > 0.5:
-        # a throw and its catch are sequential; everything else is simultaneous
+    elif (len(ranked) > 1 and ranked[1][1] > 0.5
+            and (family(ranked[1][0]) != family(kind)
+                 or {kind, ranked[1][0]} == {"thrown", "caught"})):
+        # Only pair verbs that say different things. "spun and rolled" and
+        # "rolled and shaken" are one idea stated twice, and reading two
+        # near-synonyms makes the machine sound like it is hedging.
+        #
+        # A throw and its catch are the exception: same family, but two events
+        # in sequence rather than two words for one. Blocking them cost the
+        # single description that had actually been marked right.
         joiner = ", then " if kind == "thrown" else " and "
         head = f"{kind}{joiner}{ranked[1][0]}"
     else:
@@ -514,9 +596,20 @@ def describe(f: dict, facts: list[str] | None = None,
     # distance and no single direction, and pretending otherwise is not a
     # rounding error, it is a false statement about what someone did.
     if f.get("trusted"):
-        parts.extend(_travel(f))
-    elif kind not in _NEEDS_PATH and not said_a_distance:
-        parts.append("distance unclear")
+        parts.extend(_circle_words(f) if kind == "circled" else _travel(f))
+    else:
+        # The reconstruction being untrustworthy kills the *distances*, not the
+        # *shape*, and every correction so far has been about shape: "outward
+        # and back to the front, left and right", "a clockwise circle", "back
+        # and forth eight times". Throwing the whole trajectory away left only
+        # texture — shaken, rolled, hard — which is the one thing nobody
+        # experiences themselves as doing. Same reasoning as the drawings: a bad
+        # scale does not destroy the form.
+        shape = _shape_words(f)
+        if shape:
+            parts.append(shape)
+        elif kind not in _NEEDS_PATH and not said_a_distance:
+            parts.append("distance unclear")
 
     # Autocorrelation finds a period in anything, including sensor noise on a
     # device sitting on a table — which reported a confident "~9.1 times a
@@ -524,7 +617,10 @@ def describe(f: dict, facts: list[str] | None = None,
     # distinguishes a rhythm from a fit to noise, so both must agree, exactly as
     # they must for the "shaken" verb.
     if f["repeat_hz"] and f["reversals"] >= 3:
-        parts.append(f"~{f['repeat_hz']:.1f} times a second")
+        if f["repeat_hz"] >= config.MIN_SHAKE_HZ:
+            parts.append(f"~{f['repeat_hz']:.1f} times a second")
+        else:
+            parts.append(f"repeating about every {1 / f['repeat_hz']:.1f}s")
 
     # Effort, from peak acceleration. Exactly zero means there was no
     # acceleration data to look at rather than a gentle movement — replayed
@@ -533,7 +629,10 @@ def describe(f: dict, facts: list[str] | None = None,
     # worth characterising either.
     if kind != "held" and f["peak_accel"] > 0.0:
         if f["peak_accel"] >= config.FORCEFUL_MS2:
-            parts.append("hard")
+            # "Hard" reads as impact. For something being shaken or turned it
+            # is the speed that is notable, not the force.
+            parts.append("hard" if kind in ("thrown", "caught", "tapped")
+                         else "vigorously")
         elif f["peak_accel"] <= config.GENTLE_MS2:
             parts.append("barely any force in it")
 

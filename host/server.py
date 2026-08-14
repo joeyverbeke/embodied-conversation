@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import websockets
 
-from . import config, features, link, protocol, salience
+from . import config, draw, features, link, protocol, salience, trajectory
 from .lifecycle import (DORMANT, MOVING, Holding, Lifecycle, Pause, PickedUp,
                         PutDown)
 from .policy import Policy
@@ -287,6 +287,27 @@ class Session:
 
     # ── the gate ──────────────────────────────────────────────────────────
 
+    def _picture(self, ev, feat: dict | None) -> str:
+        """Draw the movement, so it can be judged after the fact.
+
+        Only when somebody is watching the page — it costs a few milliseconds
+        and there is no reason to spend them into an empty room.
+        """
+        if not self.view or not isinstance(ev, Segment) or not feat:
+            return ""
+        try:
+            frames = ev.motion()
+            picture = ""
+            if not feat.get("airborne_ms"):
+                built = trajectory.reconstruct(frames)
+                if built is not None:
+                    picture = draw.path_svg(built.position, w=250, h=175,
+                                            trusted=bool(feat.get("trusted")))
+            return picture + draw.signal_svg(frames, w=510, h=100)
+        except Exception:
+            log.debug("could not draw the movement", exc_info=True)
+            return ""
+
     async def _maybe(self, descriptor: str, score, ev, *, feat: dict = None,
                      always: bool = False, ending: bool = False,
                      kind: str = "gesture") -> None:
@@ -299,7 +320,8 @@ class Session:
 
         if decision.speak:
             return await self._speak_it(descriptor, score, feat=feat or {},
-                                        segment=segment, kind=kind)
+                                        segment=segment, kind=kind,
+                                        picture=self._picture(ev, feat))
 
         # Cleared the bar but arrived mid-movement: hold it for a lull rather
         # than talk over someone. It expires if the lull never comes, because a
@@ -317,7 +339,8 @@ class Session:
                                   reason="waiting for a lull",
                                   score=round(decision.score, 2),
                                   bar=round(decision.bar, 2),
-                                  state=self.lifecycle.state)
+                                  state=self.lifecycle.state,
+                                  picture=self._picture(ev, feat))
             return
 
         log.info("[silent %.2f<%.2f] %s", decision.score, decision.bar,
@@ -332,10 +355,11 @@ class Session:
                               score=round(decision.score, 2),
                               bar=round(decision.bar, 2),
                               why="; ".join(score.reasons),
-                              state=self.lifecycle.state)
+                              state=self.lifecycle.state,
+                              picture=self._picture(ev, feat))
 
     async def _speak_it(self, descriptor: str, score, *, feat: dict,
-                        segment, kind: str) -> None:
+                        segment, kind: str, picture: str = "") -> None:
         timings: dict[str, float] = {"salience": score.value,
                                      "bar": round(self.policy.height(), 3)}
         t0 = time.monotonic()
@@ -344,11 +368,11 @@ class Session:
         if self.policy.spoke_at:
             timings["since_last_spoke"] = (t0 - self.policy.spoke_at) * 1000
         await self._respond(descriptor, timings, t0, segment=segment,
-                            feat=feat, kind=kind, score=score)
+                            feat=feat, kind=kind, score=score, picture=picture)
 
     async def _respond(self, descriptor: str, timings: dict, t0: float, *,
                        segment, feat: dict, kind: str = "gesture",
-                       score=None) -> None:
+                       score=None, picture: str = "") -> None:
         self.state.inflight = True
         self._drained.clear()
         utterance = None
@@ -385,6 +409,7 @@ class Session:
                 self.view.publish(kind=kind, descriptor=descriptor,
                                   utterance=utterance, responded=True,
                                   ms=round(timings.get("llm", 0)),
+                                  picture=picture,
                                   score=round(score.value, 2) if score else None,
                                   bar=round(self.policy.height(), 2),
                                   why="; ".join(score.reasons) if score else "",

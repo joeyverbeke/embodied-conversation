@@ -194,6 +194,30 @@ REPEAT_MIN_PERIODS = 2.0           # need this many cycles to call it repetition
 # autocorrelation locks onto a harmonic and reports nonsense — a live shake came
 # back as "16.7 times a second", which is not a thing a person can do.
 REPEAT_MAX_HZ = 10.0
+# A shake is fast. At 0.6 Hz — one cycle every 1.7 seconds — a slow circle in
+# the air and a deliberate out-and-back both came back as "shaken", which is
+# what a person is least likely to recognise. Below this it is a repeated
+# movement and should be described by its shape, not its texture.
+MIN_SHAKE_HZ = 1.5
+# Shape is only worth reading off the path while there is *some* signal behind
+# it. At zero confidence the reconstruction is pure integrated noise, and its
+# "out and back four times, each one bigger" was drift being read as intent.
+SHAPE_MIN_CONFIDENCE = 0.15
+
+# Circling. Fitted to exactly one labelled example — somebody drew a circle in
+# the air and corrected the machine four times about it — so the flatness gate
+# is deliberately strict: at 0.80 it catches that movement and nothing else in
+# 117 others. One positive is not enough evidence for four thresholds. Loosen
+# only against more real circles.
+CIRCLE_FLATNESS = 0.80             # 2-D spread; a shake collapses to 0.16-0.39
+CIRCLE_MIN_LAPS = 2.8              # path length versus the box it stays inside
+CIRCLE_MAX_NET = 0.25              # comes back to where it started
+CIRCLE_MIN_CM = 30.0               # below this, integrated noise looks round
+
+# Rotation with nowhere to go is somebody turning it over in their hands, which
+# is the commonest thing anyone does with an object they are holding — and it
+# was being called "spun", twice corrected.
+INHAND_MAX_CM = 25.0               # travel below this, while rotating, is in-hand
 
 # Size bands, in the units a person would use. Centimetres, because "raised it
 # about a foot" is a description and "113 degrees of path" is not.
@@ -227,7 +251,9 @@ STROKE_MIN_CM = 5.0                # shorter than this is merged into its neighb
 # them cleanly and does not depend on exactly where the window starts —
 # measured: carry 2.0, spin 3.3, lifts 5.3-9.9, shake 33.8, throw 71.3.
 GENTLE_MS2 = 2.5                   # below this: barely any force in it
-FORCEFUL_MS2 = 15.0                # above this: hard
+# A shake peaking at 44.6 m/s^2 was called "hard" and its owner called it
+# moderate. 15 was set from a bench guess and flagged nearly everything.
+FORCEFUL_MS2 = 40.0                # above this: forceful
 
 # A deliberate two-handed spin measures 107 dps median. The first guess of 180
 # was above anything a person actually does and so never fired at all.

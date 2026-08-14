@@ -342,6 +342,41 @@ def _build(path: Path, bounds: list[list[int]]) -> list[Stroke]:
     return out
 
 
+def circling(path: Path) -> float:
+    """How much this path goes *around* rather than back and forth. 0..1.
+
+    Four attempts failed before this one: cumulative heading rotation, the
+    rotation of the acceleration vector, the monotonicity of stroke headings,
+    and an isoperimetric ratio. All were more complicated than the question,
+    and one of them ranked throws as the most circular thing in the corpus.
+
+    What actually separates them is embarrassingly simple. A circle is *flat* —
+    it spreads over two dimensions where a shake or a sweep collapses onto one —
+    and it travels much further than the box it stays inside, because it keeps
+    going round. Measured on the same movement a person called "a circle in the
+    air": flatness 0.88 against 0.16-0.39 for every shake in the corpus.
+
+    Small movements are excluded on purpose. Integrated noise is isotropic, so
+    anything tiny looks perfectly round and every 8 cm wobble claimed to be a
+    circle.
+    """
+    pos = path.position
+    if len(pos) < 20:
+        return 0.0
+    p = pos - pos.mean(axis=0)
+    sv = np.linalg.svd(p, compute_uv=False)
+    flat = float(sv[1] / max(sv[0], 1e-9))
+    perimeter = float(np.sum(np.linalg.norm(np.diff(p, axis=0), axis=1)))
+    extent = float(np.linalg.norm(p.max(axis=0) - p.min(axis=0)))
+    laps = perimeter / max(extent, 1e-9)
+    net = float(np.linalg.norm(pos[-1] - pos[0])) / max(perimeter, 1e-9)
+
+    if (extent * 100 < config.CIRCLE_MIN_CM or laps < config.CIRCLE_MIN_LAPS
+            or net > config.CIRCLE_MAX_NET):
+        return 0.0
+    return flat
+
+
 def shape(legs: list[Stroke]) -> str:
     """What the sequence of strokes did, as a whole."""
     if len(legs) < 2:

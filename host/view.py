@@ -1,4 +1,23 @@
-"""A page that shows what the device would have said.
+"""One page: what it said, what you did, and what you make of it.
+
+The review used to be a separate tool over past sessions, and that was the wrong
+shape. Nobody remembers a movement from yesterday, so judging one is guesswork —
+and the physical loop it forced (play, stop, open another page, scroll back) is
+long enough that the memory is gone before you arrive.
+
+The real constraint is that both hands are on the ball. Nothing can be typed or
+clicked mid-movement; the most that fits in the pause between two gestures is a
+single keypress. So the loop is two phases and this page serves both:
+
+    playing   — glance, hit one key to rate what it just said
+    stopped   — set the ball down, type corrections on the ones it got wrong
+
+The second phase works because it happens two minutes later rather than two days
+later, and because every movement is drawn. The drawing is what makes a gesture
+recognisable after the fact; recency is what makes the judgement trustworthy.
+
+Ratings travel back over the same socket and append to logs/review.jsonl.
+
 
 Testing by ear is slow. Each utterance takes several seconds to speak, the
 device is busy for all of them, and gestures made during that window are
@@ -24,6 +43,8 @@ import logging
 import time
 
 from websockets.asyncio.server import serve
+
+from . import config
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
@@ -91,6 +112,25 @@ PAGE = """<!doctype html>
   .score b { color: #b8b8c2; font-weight: 600; }
   .score.win b { color: #86e0ac; }
   .row.stillness .said { color: #93b8e8; }
+  .pic { margin: .5rem 0 .2rem; max-width: 620px; }
+  .rate { display: flex; gap: .35rem; align-items: center; margin-top: .5rem;
+          flex-wrap: wrap; }
+  .rate button {
+    background: #20202a; border: 1px solid #2e2e38; color: #9a9aa6;
+    border-radius: .35rem; padding: .2rem .5rem; font: inherit;
+    font-size: .74rem; cursor: pointer;
+  }
+  .rate button:hover { color: #fff; border-color: #4a4a58; }
+  .rate button.on { background: #2b4a35; border-color: #3f7a51; color: #c9f5d8; }
+  .rate button.bad.on { background: #4a2b2b; border-color: #7a3f3f; color: #f5c9c9; }
+  .rate .lbl { font-size: .7rem; color: #4a4a54; margin-right: .15rem; }
+  .fix {
+    width: 100%; max-width: 620px; margin-top: .45rem; background: #101014;
+    border: 1px solid #2e2e38; color: #e8e8ea; border-radius: .35rem;
+    padding: .4rem .55rem; font: inherit; font-size: .85rem;
+  }
+  .row.latest { border-left: 2px solid #3f6ea8; padding-left: .7rem; }
+  .judged { color: #86e0ac; font-size: .7rem; margin-left: .3rem; }
   .empty { color: #55555f; font-style: italic; padding-top: 2rem; }
 </style>
 <header>
@@ -120,6 +160,12 @@ PAGE = """<!doctype html>
     const desc = document.createElement('div');
     desc.className = 'desc';
     desc.textContent = e.descriptor || '';
+    if (e.picture) {
+      const pic = document.createElement('div');
+      pic.className = 'pic';
+      pic.innerHTML = e.picture;
+      row.append(pic);
+    }
     row.append(said, desc);
     if (e.score != null) {
       // The score and the bar it faced. Once silence is the main behaviour a
@@ -137,12 +183,82 @@ PAGE = """<!doctype html>
       meta.textContent = e.ms + ' ms';
       row.append(meta);
     }
+    // Rating lives on the row itself, so the thing being judged and the
+    // judgement are never more than a glance apart.
+    if (e.descriptor) {
+      const rate = document.createElement('div');
+      rate.className = 'rate';
+      rate.innerHTML =
+        '<span class="lbl">right?</span>'
+      + '<button class="bad" data-g="accuracy" data-v="wrong">1 wrong</button>'
+      + '<button data-g="accuracy" data-v="vague">2 vague</button>'
+      + '<button data-g="accuracy" data-v="right">3 yes</button>'
+      + '<span class="lbl" style="margin-left:.6rem">speak?</span>'
+      + '<button data-g="timing" data-v="yes">4 yes</button>'
+      + '<button class="bad" data-g="timing" data-v="no">5 no</button>';
+      const fix = document.createElement('input');
+      fix.className = 'fix';
+      fix.placeholder = 'what should it have said?';
+      fix.onkeydown = ev => {
+        if (ev.key !== 'Enter') return;
+        send(row, {should_have_said: fix.value.trim()});
+        fix.blur();
+      };
+      rate.onclick = ev => {
+        const b = ev.target.closest('button'); if (!b) return;
+        [...rate.querySelectorAll('button')].forEach(o => {
+          if (o.dataset.g === b.dataset.g) o.classList.toggle('on', o === b);
+        });
+        send(row, {[b.dataset.g]: b.dataset.v});
+      };
+      row.append(rate, fix);
+      row._event = e;
+    }
+    [...feed.querySelectorAll('.latest')].forEach(r => r.classList.remove('latest'));
+    row.classList.add('latest');
     feed.prepend(row);
-    while (feed.children.length > 200) feed.lastChild.remove();
+    while (feed.children.length > 60) feed.lastChild.remove();
   }
+
+  let sock = null;
+
+  function send(row, patch) {
+    // Merge, so rating accuracy then timing then typing a correction is three
+    // keystrokes rather than three separate records to reconcile later.
+    row._judgement = Object.assign({}, row._judgement, patch);
+    const e = row._event || {};
+    if (sock && sock.readyState === 1) {
+      sock.send(JSON.stringify(Object.assign({
+        judge: true, descriptor: e.descriptor, utterance: e.utterance,
+        spoke: !!e.responded, salience: e.score, bar: e.bar, kind: e.kind,
+      }, row._judgement)));
+    }
+    if (!row.querySelector('.judged')) {
+      const tick = document.createElement('span');
+      tick.className = 'judged';
+      tick.textContent = 'saved';
+      row.querySelector('.rate').append(tick);
+    }
+  }
+
+  // Number keys rate the newest row, so a movement can be judged one-handed
+  // without looking away from what you are holding.
+  document.addEventListener('keydown', ev => {
+    if (ev.target.tagName === 'INPUT') return;
+    const map = {'1':['accuracy','wrong'],'2':['accuracy','vague'],
+                 '3':['accuracy','right'],'4':['timing','yes'],'5':['timing','no']};
+    const m = map[ev.key];
+    if (!m) return;
+    const row = feed.querySelector('.latest');
+    if (!row || !row._event) return;
+    const b = row.querySelector('[data-g="'+m[0]+'"][data-v="'+m[1]+'"]');
+    if (b) b.click();
+    ev.preventDefault();
+  });
 
   function connect() {
     const ws = new WebSocket('ws://' + location.host + '/feed');
+    sock = ws;
     ws.onopen = () => { status.className = 'live'; status.textContent = 'live'; };
     ws.onmessage = m => {
       const e = JSON.parse(m.data);
@@ -165,17 +281,36 @@ PAGE = """<!doctype html>
 class View:
     """Fan out one event to every open page. Never blocks the pipeline."""
 
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, judgements=None) -> None:
         self.port = port
+        self.judgements = judgements or (config.LOG_DIR / "review.jsonl")
         self._clients: set = set()
         self._sends: set = set()        # strong refs; see publish()
 
     async def _handler(self, ws) -> None:
         self._clients.add(ws)
         try:
-            await ws.wait_closed()
+            async for message in ws:
+                try:
+                    payload = json.loads(message)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if payload.pop("judge", False):
+                    self._record(payload)
+        except Exception:
+            pass
         finally:
             self._clients.discard(ws)
+
+    def _record(self, judgement: dict) -> None:
+        """Append one judgement. Never let a bad one take the server with it."""
+        judgement["t"] = time.time()
+        try:
+            self.judgements.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.judgements, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(judgement, separators=(",", ":")) + "\n")
+        except OSError as exc:
+            log.warning("could not save judgement: %s", exc)
 
     def _http(self, connection, request):
         """Serve the page for anything that is not the feed socket."""
